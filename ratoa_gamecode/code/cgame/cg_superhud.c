@@ -1572,96 +1572,91 @@ static qboolean SH_Visible( const shElement_t *e ) {
 	return qfalse;
 }
 
-static int SH_OwnScore( void ) {
-	if ( CG_IsTeamGametype() ) {
-		if ( cg.snap->ps.persistant[PERS_TEAM] == TEAM_RED ) {
-			return cgs.scores1;
-		}
-		if ( cg.snap->ps.persistant[PERS_TEAM] == TEAM_BLUE ) {
-			return cgs.scores2;
-		}
-	}
-	return cg.snap->ps.persistant[PERS_SCORE];
+static qboolean SH_Playing( int cl ) {
+	return cl >= 0 && cl < MAX_CLIENTS && cgs.clientinfo[cl].infoValid
+		&& cgs.clientinfo[cl].team != TEAM_SPECTATOR;
 }
 
-static int SH_NmeScore( void ) {
-	if ( CG_IsTeamGametype() ) {
-		if ( cg.snap->ps.persistant[PERS_TEAM] == TEAM_RED ) {
-			return cgs.scores2;
-		}
-		if ( cg.snap->ps.persistant[PERS_TEAM] == TEAM_BLUE ) {
-			return cgs.scores1;
-		}
-		return cgs.scores2;
-	}
+static int SH_NextPlaying( int skip ) {
+	int i, cl;
 
-	/* FFA/tourney: CS_SCORES1 is first place, CS_SCORES2 is second.
-	   Do not compare against own score — a tie makes both values equal. */
-	if ( ( cg.snap->ps.persistant[PERS_RANK] & ~RANK_TIED_FLAG ) == 0 ) {
-		return cgs.scores2;
-	}
-	return cgs.scores1;
-}
-
-static int SH_NmeClientNum( void ) {
-	int i;
-	int own = cg.snap->ps.clientNum;
-
-	if ( cg.numScores > 0 ) {
-		for ( i = 0; i < cg.numScores; i++ ) {
-			clientInfo_t *ci = &cgs.clientinfo[cg.scores[i].client];
-			if ( cg.scores[i].client == own ) {
-				continue;
-			}
-			if ( !ci->infoValid || ci->team == TEAM_SPECTATOR ) {
-				continue;
-			}
-			return cg.scores[i].client;
+	for ( i = 0; i < cg.numScores; i++ ) {
+		cl = cg.scores[i].client;
+		if ( cl != skip && SH_Playing( cl ) ) {
+			return cl;
 		}
 	}
 	for ( i = 0; i < cgs.maxclients; i++ ) {
-		if ( i == own ) {
-			continue;
+		if ( i != skip && SH_Playing( i ) ) {
+			return i;
 		}
-		if ( !cgs.clientinfo[i].infoValid || cgs.clientinfo[i].team == TEAM_SPECTATOR ) {
-			continue;
-		}
-		return i;
 	}
 	return -1;
 }
 
-static const char *SH_OwnName( void ) {
-	if ( CG_IsTeamGametype() ) {
-		int team = cg.snap->ps.persistant[PERS_TEAM];
-		if ( team == TEAM_RED ) {
-			return cg_redTeamName.string[0] ? cg_redTeamName.string : "Red";
-		}
-		if ( team == TEAM_BLUE ) {
-			return cg_blueTeamName.string[0] ? cg_blueTeamName.string : "Blue";
-		}
+static int SH_OwnTeam( void ) {
+	int t;
+
+	t = cg.snap->ps.persistant[PERS_TEAM];
+	if ( t == TEAM_RED || t == TEAM_BLUE ) {
+		return t;
 	}
-	return cgs.clientinfo[cg.snap->ps.clientNum].name;
+	t = cgs.clientinfo[cg.snap->ps.clientNum].team;
+	if ( t == TEAM_RED || t == TEAM_BLUE ) {
+		return t;
+	}
+	t = cgs.clientinfo[cg.clientNum].team;
+	if ( t == TEAM_RED || t == TEAM_BLUE ) {
+		return t;
+	}
+	return TEAM_RED;
 }
 
-static const char *SH_NmeName( void ) {
-	int cl;
+static const char *SH_TeamName( int team ) {
+	if ( team == TEAM_BLUE ) {
+		return cg_blueTeamName.string[0] ? cg_blueTeamName.string : "Blue";
+	}
+	return cg_redTeamName.string[0] ? cg_redTeamName.string : "Red";
+}
+
+static int SH_MatchupScore( qboolean nme ) {
+	int cl, i;
 
 	if ( CG_IsTeamGametype() ) {
-		int team = cg.snap->ps.persistant[PERS_TEAM];
-		if ( team == TEAM_RED ) {
-			return cg_blueTeamName.string[0] ? cg_blueTeamName.string : "Blue";
-		}
-		if ( team == TEAM_BLUE ) {
-			return cg_redTeamName.string[0] ? cg_redTeamName.string : "Red";
-		}
-		return "Enemy";
+		return ( ( SH_OwnTeam() == TEAM_BLUE ) == nme ) ? cgs.scores1 : cgs.scores2;
 	}
-	cl = SH_NmeClientNum();
-	if ( cl < 0 ) {
-		return "";
+	cl = SH_Playing( cg.snap->ps.clientNum ) ? cg.snap->ps.clientNum : SH_NextPlaying( -1 );
+	if ( nme ) {
+		cl = SH_NextPlaying( cl );
+	} else if ( cl == cg.snap->ps.clientNum ) {
+		return cg.snap->ps.persistant[PERS_SCORE];
 	}
-	return cgs.clientinfo[cl].name;
+	if ( !SH_Playing( cl ) ) {
+		return SCORE_NOT_PRESENT;
+	}
+	for ( i = 0; i < cg.numScores; i++ ) {
+		if ( cg.scores[i].client == cl ) {
+			return cg.scores[i].score;
+		}
+	}
+	return cgs.clientinfo[cl].score;
+}
+
+static const char *SH_MatchupName( qboolean nme ) {
+	int cl, team;
+
+	if ( CG_IsTeamGametype() ) {
+		team = SH_OwnTeam();
+		if ( nme ) {
+			team = ( team == TEAM_BLUE ) ? TEAM_RED : TEAM_BLUE;
+		}
+		return SH_TeamName( team );
+	}
+	cl = SH_Playing( cg.snap->ps.clientNum ) ? cg.snap->ps.clientNum : SH_NextPlaying( -1 );
+	if ( nme ) {
+		cl = SH_NextPlaying( cl );
+	}
+	return SH_Playing( cl ) ? cgs.clientinfo[cl].name : "";
 }
 
 static const char *SH_GameTypeString( void ) {
@@ -1698,19 +1693,25 @@ static int SH_GameLimit( void ) {
 	return cgs.fraglimit;
 }
 
+/* Two-party matchup (1v1 or team vs team). Not FFA / LMS / other free-for-all. */
+static qboolean SH_IsMatchupGametype( void ) {
+	return CG_IsTeamGametype() || cgs.gametype == GT_TOURNAMENT
+#ifdef WITH_MULTITOURNAMENT
+		|| cgs.gametype == GT_MULTITOURNAMENT
+#endif
+		;
+}
+
 /*
  * CPMA HUDs put a PreDecorate { text "vs" } in the same slot as Score_Limit.
  * Show "vs" only when there is no frag/capture limit; otherwise show the limit.
  */
-static qboolean SH_IsVsDecor( const shElement_t *e ) {
-	return e->text[0] && !Q_stricmp( e->text, "vs" );
-}
-
 static void SH_DrawDecor( const shElement_t *e ) {
 	if ( !SH_Visible( e ) ) {
 		return;
 	}
-	if ( SH_IsVsDecor( e ) && SH_GameLimit() > 0 ) {
+	if ( e->text[0] && !Q_stricmp( e->text, "vs" )
+			&& ( !SH_IsMatchupGametype() || SH_GameLimit() > 0 ) ) {
 		return;
 	}
 	SH_DrawFill( e );
@@ -1821,36 +1822,38 @@ static void SH_DrawGameTime( void ) {
 
 static void SH_DrawScores( void ) {
 	char buf[32];
-	int nme;
-	int limit;
+	int side, val, limit;
+	shElement_t *scoreEl, *nameEl;
+	const char *name;
 
-	if ( SH_Visible( &sh.named[SH_Score_OWN] ) ) {
-		SH_DrawFill( &sh.named[SH_Score_OWN] );
-		Com_sprintf( buf, sizeof( buf ), "%i", SH_OwnScore() );
-		SH_DrawString( &sh.named[SH_Score_OWN], buf, 0 );
-	}
-	if ( SH_Visible( &sh.named[SH_Score_NME] ) ) {
-		nme = SH_NmeScore();
-		if ( nme != SCORE_NOT_PRESENT ) {
-			SH_DrawFill( &sh.named[SH_Score_NME] );
-			Com_sprintf( buf, sizeof( buf ), "%i", nme );
-			SH_DrawString( &sh.named[SH_Score_NME], buf, 0 );
+	for ( side = 0; side < 2; side++ ) {
+		scoreEl = &sh.named[side ? SH_Score_NME : SH_Score_OWN];
+		if ( SH_Visible( scoreEl ) ) {
+			val = SH_MatchupScore( side );
+			if ( val != SCORE_NOT_PRESENT ) {
+				SH_DrawFill( scoreEl );
+				Com_sprintf( buf, sizeof( buf ), "%i", val );
+				SH_DrawString( scoreEl, buf, 0 );
+			}
 		}
 	}
-	/* Mutually exclusive with PreDecorate text "vs" (see SH_DrawDecor). */
 	limit = SH_GameLimit();
 	if ( SH_Visible( &sh.named[SH_Score_Limit] ) && limit > 0 ) {
 		SH_DrawFill( &sh.named[SH_Score_Limit] );
 		Com_sprintf( buf, sizeof( buf ), "%i", limit );
 		SH_DrawString( &sh.named[SH_Score_Limit], buf, 0 );
 	}
-	if ( SH_Visible( &sh.named[SH_Name_OWN] ) ) {
-		SH_DrawString( &sh.named[SH_Name_OWN], SH_OwnName(), 0 );
+	if ( !SH_IsMatchupGametype() ) {
+		return;
 	}
-	if ( SH_Visible( &sh.named[SH_Name_NME] ) ) {
-		const char *n = SH_NmeName();
-		if ( n && n[0] ) {
-			SH_DrawString( &sh.named[SH_Name_NME], n, 0 );
+	for ( side = 0; side < 2; side++ ) {
+		nameEl = &sh.named[side ? SH_Name_NME : SH_Name_OWN];
+		if ( !SH_Visible( nameEl ) ) {
+			continue;
+		}
+		name = SH_MatchupName( side );
+		if ( name && name[0] ) {
+			SH_DrawString( nameEl, name, 0 );
 		}
 	}
 }

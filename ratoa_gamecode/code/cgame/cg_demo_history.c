@@ -28,8 +28,25 @@ typedef struct {
 static demoRewindSave_t cg_demoRewindSaves[MAX_CLIENTS];
 static int cg_demoRewindSaveCount;
 
+/*
+ * Witnessed tele IN/OUT, held until delayed clock (cg.time - ping) reaches
+ * that snap. Not synthesized from later player visibility.
+ */
+#define CG_DEMO_DELAYED_TELE_CAP 24
+
+typedef struct {
+	int		snapServerTime;
+	int		event;
+	int		soundEntityNum;
+	vec3_t	origin;
+} demoDelayedTele_t;
+
+static demoDelayedTele_t cg_demoDelayedTele[CG_DEMO_DELAYED_TELE_CAP];
+static int cg_demoDelayedTeleCount;
+
 static int demoDelagPingRawAlongInterpolation( void );
 static qboolean demoDelagResolvePingMs( int *outPing );
+static void demoDelagFlushDelayedTeleports( void );
 
 void CG_DemoHistory_Clear( void ) {
 	int i;
@@ -38,6 +55,7 @@ void CG_DemoHistory_Clear( void ) {
 	cg_demoHistoryCount = 0;
 	cg_demoHistoryLastServerTime = -1;
 	cg_demoRewindSaveCount = 0;
+	cg_demoDelayedTeleCount = 0;
 	cg_demoDelagPingSmoothed = -1;
 	for ( i = 0; i < MAX_GENTITIES; i++ ) {
 		cg_entities[i].demoDelagVisualCached = qfalse;
@@ -75,6 +93,7 @@ void CG_DemoHistory_Frame( void ) {
 		cg_demoDelagPingSmoothed = -1;
 	}
 	cg_demoHistoryPrevPlayback = cg.demoPlayback;
+	demoDelagFlushDelayedTeleports();
 }
 
 void CG_DemoHistory_OnSnapshot( const snapshot_t *snap ) {
@@ -132,19 +151,25 @@ qboolean CG_DemoHistory_DemoDelagActive( void ) {
 	return cg.demoPlayback && cg_demoDelag.integer && cgs.delagHitscan && CG_DemoHistory_GetCount() > 0;
 }
 
-qboolean CG_DemoHistory_SuppressLivePlayerTeleportEvent( int clientNum ) {
-	if ( !CG_DemoHistory_DemoDelagActive() ) {
+qboolean CG_DemoHistory_DelayPlayerTeleportEvent( int clientNum, int event, const vec3_t origin ) {
+	demoDelayedTele_t *slot;
+	int ping;
+
+	if ( !CG_DemoHistory_DemoDelagActive() || !cg.snap || !origin ) {
 		return qfalse;
 	}
-	if ( !cg.snap ) {
+	if ( clientNum == cg.predictedPlayerState.clientNum || !demoDelagResolvePingMs( &ping ) ) {
 		return qfalse;
 	}
-	if ( clientNum < 0 || clientNum >= MAX_CLIENTS ) {
-		return qfalse;
+	if ( cg_demoDelayedTeleCount >= CG_DEMO_DELAYED_TELE_CAP ) {
+		return qtrue;
 	}
-	if ( clientNum == cg.predictedPlayerState.clientNum ) {
-		return qfalse;
-	}
+
+	slot = &cg_demoDelayedTele[cg_demoDelayedTeleCount++];
+	slot->snapServerTime = cg.snap->serverTime;
+	slot->event = event;
+	slot->soundEntityNum = ( clientNum >= 0 && clientNum < MAX_CLIENTS ) ? clientNum : ENTITYNUM_WORLD;
+	VectorCopy( origin, slot->origin );
 	return qtrue;
 }
 
@@ -295,6 +320,38 @@ static qboolean demoDelagResolvePingMs( int *outPing ) {
 	return qtrue;
 }
 
+static void demoDelagFlushDelayedTeleports( void ) {
+	int ping, i, kept, soundEnt;
+	vec3_t origin;
+	demoDelayedTele_t *ev;
+
+	if ( !CG_DemoHistory_DemoDelagActive() || !cg.snap ) {
+		cg_demoDelayedTeleCount = 0;
+		return;
+	}
+	if ( !demoDelagResolvePingMs( &ping ) ) {
+		return;
+	}
+
+	kept = 0;
+	for ( i = 0; i < cg_demoDelayedTeleCount; i++ ) {
+		ev = &cg_demoDelayedTele[i];
+		if ( cg.time - ping < ev->snapServerTime ) {
+			cg_demoDelayedTele[kept++] = *ev;
+			continue;
+		}
+		soundEnt = ev->soundEntityNum;
+		if ( soundEnt < 0 || soundEnt >= MAX_GENTITIES ) {
+			soundEnt = ENTITYNUM_WORLD;
+		}
+		VectorCopy( ev->origin, origin );
+		trap_S_StartSound( origin, soundEnt, CHAN_AUTO,
+			ev->event == EV_PLAYER_TELEPORT_OUT ? cgs.media.teleOutSound : cgs.media.teleInSound );
+		CG_SpawnEffect( origin );
+	}
+	cg_demoDelayedTeleCount = kept;
+}
+
 static int demoDelagAttackerSampleTime( int attackServerTime ) {
 	int ping;
 
@@ -302,25 +359,6 @@ static int demoDelagAttackerSampleTime( int attackServerTime ) {
 		return clampServerTimeToHistory( attackServerTime );
 	}
 	return clampServerTimeToHistory( attackServerTime - ping );
-}
-
-int CG_DemoHistory_LocalFireDelay( void ) {
-	int ping;
-	int frameMsec;
-
-	if ( !CG_DemoHistory_DemoDelagActive() ) {
-		return 0;
-	}
-	if ( !demoDelagResolvePingMs( &ping ) ) {
-		return 0;
-	}
-	if ( sv_fps.integer > 0 ) {
-		frameMsec = 1000 / sv_fps.integer;
-		if ( ping > frameMsec ) {
-			ping = frameMsec;
-		}
-	}
-	return ping;
 }
 
 static qboolean demoDelagEFlagsTeleported( int eFlagsA, int eFlagsB ) {
@@ -592,13 +630,11 @@ static qboolean demoDelagSamplePoseAtTime( centity_t *cent, int entityNum, int t
 }
 
 static void demoDelagApplyVisual( centity_t *cent, const vec3_t origin, const vec3_t angles, const entityState_t *drawEs ) {
-	vec3_t oldOrigin;
 	int oldFlags;
 	qboolean hadPrev;
 
 	hadPrev = cent->demoDelagLastVisualEFlagsValid;
 	oldFlags = cent->demoDelagLastVisualEFlags;
-	VectorCopy( cent->demoDelagVisualOrigin, oldOrigin );
 
 	VectorCopy( origin, cent->lerpOrigin );
 	VectorCopy( angles, cent->lerpAngles );
@@ -614,23 +650,38 @@ static void demoDelagApplyVisual( centity_t *cent, const vec3_t origin, const ve
 	cent->demoDelagDrawStateValid = qtrue;
 
 	if ( hadPrev && demoDelagEFlagsTeleported( oldFlags, drawEs->eFlags ) ) {
-		vec3_t fxOrigin;
-
-		VectorCopy( origin, fxOrigin );
-		if ( !( oldFlags & EF_DEAD ) && !( drawEs->eFlags & EF_DEAD ) ) {
-			trap_S_StartSound( NULL, cent->currentState.number, CHAN_AUTO, cgs.media.teleOutSound );
-			CG_SpawnEffect( oldOrigin );
-			trap_S_StartSound( NULL, cent->currentState.number, CHAN_AUTO, cgs.media.teleInSound );
-			CG_SpawnEffect( fxOrigin );
-		} else if ( ( oldFlags & EF_DEAD ) && !( drawEs->eFlags & EF_DEAD ) ) {
-			trap_S_StartSound( NULL, cent->currentState.number, CHAN_AUTO, cgs.media.teleInSound );
-			CG_SpawnEffect( fxOrigin );
-		}
 		CG_DemoDelagResetPlayerAnims( cent, drawEs->legsAnim, drawEs->torsoAnim );
 	}
 
 	cent->demoDelagLastVisualEFlags = drawEs->eFlags;
 	cent->demoDelagLastVisualEFlagsValid = qtrue;
+}
+
+/*
+ * Server time of the first history snap in (tLo, tHi] where this player's
+ * teleport bit has flipped from flagsLo. That is the delayed-clock instant
+ * of the tele, matching EV_PLAYER_TELEPORT_* snapServerTime.
+ */
+static int demoDelagFirstTeleportHistoryTime( int entityNum, int flagsLo, int tLo, int tHi ) {
+	int c, i, e;
+	const snapshot_t *sn;
+
+	c = CG_DemoHistory_GetCount();
+	for ( i = c - 1; i >= 0; i-- ) {
+		sn = CG_DemoHistory_GetByFramesAgo( i );
+		if ( !sn || sn->serverTime <= tLo || sn->serverTime > tHi ) {
+			continue;
+		}
+		for ( e = 0; e < sn->numEntities; e++ ) {
+			if ( sn->entities[e].number == entityNum ) {
+				if ( demoDelagEFlagsTeleported( flagsLo, sn->entities[e].eFlags ) ) {
+					return sn->serverTime;
+				}
+				break;
+			}
+		}
+	}
+	return tHi;
 }
 
 void CG_DemoHistory_BeginHitscanRewind( int rewindToServerTime, int skipEntityNum ) {
@@ -736,10 +787,11 @@ void CG_DemoHistory_AdjustPlayerLerpForDemoDelag( centity_t *cent ) {
 		okHi = demoDelagSamplePoseAtTime( cent, cent->currentState.number, tHi, originHi, anglesHi, &flagsHi, &esHi );
 		if ( okLo && okHi ) {
 			if ( demoDelagEFlagsTeleported( flagsLo, flagsHi ) ) {
-				/* interpolate=false: stay on delayed-current until the delayed snap transitions. */
-				VectorCopy( originLo, origin );
-				VectorCopy( anglesLo, angles );
-				drawEs = esLo;
+				if ( cg.time - ping >= demoDelagFirstTeleportHistoryTime( cent->currentState.number, flagsLo, tLo, tHi ) ) {
+					demoDelagApplyVisual( cent, originHi, anglesHi, &esHi );
+				} else {
+					demoDelagApplyVisual( cent, originLo, anglesLo, &esLo );
+				}
 			} else {
 				origin[0] = originLo[0] + f * ( originHi[0] - originLo[0] );
 				origin[1] = originLo[1] + f * ( originHi[1] - originLo[1] );
@@ -748,8 +800,8 @@ void CG_DemoHistory_AdjustPlayerLerpForDemoDelag( centity_t *cent ) {
 				angles[1] = LerpAngle( anglesLo[1], anglesHi[1], f );
 				angles[2] = LerpAngle( anglesLo[2], anglesHi[2], f );
 				drawEs = esLo;
+				demoDelagApplyVisual( cent, origin, angles, &drawEs );
 			}
-			demoDelagApplyVisual( cent, origin, angles, &drawEs );
 			return;
 		}
 		if ( okLo ) {
