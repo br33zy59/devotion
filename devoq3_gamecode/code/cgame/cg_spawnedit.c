@@ -7,7 +7,10 @@ Spectator spawn point editor.
 #include "cg_local.h"
 #include "cg_overlay.h"
 #include "cg_mapedit.h"
+#include "cg_spawnedit_tele.h"
 #include "../client/keycodes.h"
+
+#define SPAWNEDIT_MODE_TAB_EXTRA	( SPAWNEDIT_TELE_MODE_TAB_H + 4 )
 
 #define SPAWNEDIT_ROW_H				14
 #define SPAWNEDIT_PANEL_PAD			8
@@ -20,7 +23,7 @@ Spectator spawn point editor.
 #define SPAWNEDIT_ORIGIN_MATCH_EPS	4.0f
 #define SPAWNEDIT_HOME_Z_SLACK		24.0f
 #define SPAWNEDIT_RESET_GAP			4
-#define SPAWNEDIT_SIDEBAR_HDR		( OVERLAY_SIDE_HDR_H + 4 + 26 + SPAWNEDIT_MOVE_GAP + SPAWNEDIT_MOVE_BTN_H )
+#define SPAWNEDIT_SIDEBAR_HDR		( OVERLAY_SIDE_HDR_H + 4 + SPAWNEDIT_MODE_TAB_EXTRA + 26 + SPAWNEDIT_MOVE_GAP + SPAWNEDIT_MOVE_BTN_H )
 #define SPAWNEDIT_MOVE_ROW_Y		( OVERLAY_SIDE_HDR_H + 30 )
 #define SPAWNEDIT_HDR_LINE1_Y		( OVERLAY_SIDE_HDR_H + 6 )
 #define SPAWNEDIT_HDR_LINE2_Y		( OVERLAY_SIDE_HDR_H + 16 )
@@ -102,6 +105,7 @@ void CG_SpawnEdit_SetSidebarOpen( qboolean open ) {
 	cg_spawnEditSidebarOpen = open;
 	if ( !open ) {
 		CG_SpawnEdit_CancelMove();
+		CG_SpawnEdit_Tele_OnSidebarClose();
 		cg_spawnEditTarget = -1;
 	}
 }
@@ -304,6 +308,10 @@ static void CG_SpawnEdit_CancelMove( void ) {
 	cg_spawnEditMoveBtnHover = -1;
 }
 
+void CG_SpawnEdit_AbortMove( void ) {
+	CG_SpawnEdit_CancelMove();
+}
+
 static void CG_SpawnEdit_SetGhostYawTowardSpectator( void ) {
 	vec3_t	dir;
 	vec3_t	angles;
@@ -350,8 +358,13 @@ static void CG_SpawnEdit_UpdateMoveGhost( void ) {
 }
 
 void CG_SpawnEdit_Frame( void ) {
-	CG_SpawnEdit_UpdateTarget();
-	CG_SpawnEdit_UpdateMoveGhost();
+	if ( CG_SpawnEdit_Tele_PanelMode() == 1 ) {
+		CG_SpawnEdit_Tele_Frame();
+		CG_SpawnEdit_Tele_UpdateMoveGhost();
+	} else {
+		CG_SpawnEdit_UpdateTarget();
+		CG_SpawnEdit_UpdateMoveGhost();
+	}
 }
 
 int CG_SpawnEdit_HighlightEntNum( void ) {
@@ -383,6 +396,11 @@ void CG_SpawnEdit_AddSceneEntities( void ) {
 	int				highlight;
 	int				i;
 	int				skipEnt;
+
+	if ( CG_SpawnEdit_Tele_PanelMode() == 1 ) {
+		CG_SpawnEdit_Tele_AddSceneEntities();
+		return;
+	}
 
 	if ( !CG_SpawnEdit_Active() || !cg_spawnEditSidebarOpen ) {
 		return;
@@ -763,6 +781,12 @@ void CG_SpawnEdit_DrawSidebar( int bodyX, int bodyY, int bodyW, int bodyH ) {
 	spawnEditEntry_t	*entEntry;
 	qboolean			hasTarget;
 
+	CG_SpawnEdit_Tele_DrawModeTabs( bodyX, bodyY, bodyW );
+	if ( CG_SpawnEdit_Tele_PanelMode() == 1 ) {
+		CG_SpawnEdit_Tele_DrawContent( bodyX, bodyY, bodyW, bodyH );
+		return;
+	}
+
 	muted[0] = 0.65f; muted[1] = 0.68f; muted[2] = 0.72f; muted[3] = 1.0f;
 	hasTarget = ( cg_spawnEditTarget >= MAX_CLIENTS ) ? qtrue : qfalse;
 	entEntry = hasTarget ? CG_SpawnEdit_EntryForEnt( cg_spawnEditTarget ) : NULL;
@@ -831,6 +855,11 @@ void CG_SpawnEdit_DrawResetModal( void ) {
 	const char	*lines[3];
 	const char	*label;
 
+	CG_SpawnEdit_Tele_DrawResetModal();
+	if ( CG_SpawnEdit_Tele_ResetPrompt() ) {
+		return;
+	}
+
 	if ( !cg_spawnEditResetPrompt ) {
 		return;
 	}
@@ -864,12 +893,15 @@ void CG_SpawnEdit_DrawResetModal( void ) {
 }
 
 qboolean CG_SpawnEdit_ModalOpen( void ) {
-	return cg_spawnEditResetPrompt;
+	return cg_spawnEditResetPrompt || CG_SpawnEdit_Tele_ResetPrompt();
 }
 
 qboolean CG_SpawnEdit_KeyEvent( int key, qboolean down ) {
 	if ( !down ) {
 		return qfalse;
+	}
+	if ( CG_SpawnEdit_Tele_KeyEvent( key, down ) ) {
+		return qtrue;
 	}
 	if ( cg_spawnEditMoveActive && key == K_ESCAPE ) {
 		CG_SpawnEdit_CancelMove();
@@ -946,6 +978,11 @@ void CG_SpawnEdit_PointerMoveSidebar( int mx, int my, int bodyX, int bodyY, int 
 	int	rowIndex;
 	spawnEditEntry_t	*entEntry;
 
+	if ( CG_SpawnEdit_Tele_PanelMode() == 1 ) {
+		CG_SpawnEdit_Tele_PointerMove( mx, my, bodyX, bodyY, bodyW, bodyH );
+		return;
+	}
+
 	cg_spawnEditResetBtnHover = -1;
 	cg_spawnEditActionBtnHover = -1;
 	cg_spawnEditDefaultLineHover = qfalse;
@@ -989,6 +1026,13 @@ void CG_SpawnEdit_PointerMoveSidebar( int mx, int my, int bodyX, int bodyY, int 
 qboolean CG_SpawnEdit_HandleClickSidebar( int mx, int my, int bodyX, int bodyY, int bodyW, int bodyH ) {
 	int	modalBtn;
 	int	rowIndex;
+
+	if ( CG_SpawnEdit_Tele_HandleClick( mx, my, bodyX, bodyY, bodyW, bodyH ) ) {
+		return qtrue;
+	}
+	if ( CG_SpawnEdit_Tele_PanelMode() == 1 ) {
+		return qfalse;
+	}
 
 	if ( mx >= bodyX && mx < bodyX + bodyW && my >= bodyY && my < bodyY + OVERLAY_SIDE_HDR_H + 4 ) {
 		return qfalse;
@@ -1075,4 +1119,5 @@ void CG_SpawnEdit_Init( void ) {
 	cg_spawnEditResetPrompt = qfalse;
 	cg_spawnEditSidebarWasOpen = qfalse;
 	CG_SpawnEdit_CancelMove();
+	CG_SpawnEdit_Tele_Init();
 }

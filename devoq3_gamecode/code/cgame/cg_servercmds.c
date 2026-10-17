@@ -2725,6 +2725,10 @@ static void CG_ServerCommand( void ) {
             CG_SpawnEdit_ParseRoster();
             return;
         }
+        if ( !strcmp( cmd, "spawnEditTeleRoster" ) ) {
+            CG_SpawnEdit_Tele_ParseRoster();
+            return;
+        }
         if ( !strcmp( cmd, "spawnPoints" ) ) {
 		CG_ParseSpawnpoints();
 		return;

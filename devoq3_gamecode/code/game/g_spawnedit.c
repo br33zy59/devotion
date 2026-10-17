@@ -7,6 +7,7 @@ Session layout persists in layouts/session_spawns.cfg across map_restart only.
 
 #include "g_local.h"
 #include "g_spawnedit.h"
+#include "g_spawnedit_tele.h"
 
 #define SPAWNEDIT_SPEC_BIT			1
 #define SPAWNEDIT_MAX_RECORDS		256
@@ -783,6 +784,8 @@ void SpawnEdit_LoadLayoutForMap( void ) {
 	char	info[MAX_INFO_STRING];
 	const char *s;
 
+	SpawnEdit_Tele_InitMap();
+
 	if ( spawnEdit_dirty ) {
 		SpawnEdit_CommitLayout();
 	}
@@ -807,6 +810,7 @@ void SpawnEdit_OnEntitiesSpawned( void ) {
 	SpawnEdit_ApplyAllTeams();
 	SpawnEdit_ApplyAllDeletes();
 	SpawnEdit_ApplyAllAdds();
+	SpawnEdit_Tele_OnEntitiesSpawned();
 }
 
 void SpawnEdit_Init( void ) {
@@ -815,9 +819,11 @@ void SpawnEdit_Init( void ) {
 
 void SpawnEdit_UpdateConfigstring( void ) {
 	SpawnEdit_BroadcastRoster();
+	SpawnEdit_Tele_BroadcastRoster();
 }
 
 void SpawnEdit_Shutdown( int restart ) {
+	SpawnEdit_Tele_Shutdown( restart );
 	if ( restart && g_gametype.integer == spawnEdit_levelGametype && spawnEdit_mapName[0] ) {
 		if ( spawnEdit_dirty ) {
 			SpawnEdit_CommitLayout();
@@ -846,6 +852,11 @@ void Cmd_SpawnEdit_f( gentity_t *ent ) {
 
 	if ( !Q_stricmp( sub, "sync" ) ) {
 		SpawnEdit_SendRoster( ent );
+		SpawnEdit_Tele_SendRoster( ent );
+		return;
+	}
+
+	if ( SpawnEdit_Tele_HandleCommand( ent, sub ) ) {
 		return;
 	}
 
@@ -1057,5 +1068,5 @@ void Cmd_SpawnEdit_f( gentity_t *ent ) {
 	}
 
 	trap_SendServerCommand( ent - g_entities,
-			"print \"usage: spawnedit set|move|homemove|add|delete|clear|reset|sync\n\"" );
+			"print \"usage: spawnedit set|move|homemove|add|delete|clear|reset|sync|telemove|teledestmove|telehome|telereset\n\"" );
 }
